@@ -12,6 +12,7 @@ import sys
 # The "invalid low watermark ratio 1.4" error occurs when PyTorch calculates internal ratios incorrectly
 # Solution: Use PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0 (unlimited) as recommended by PyTorch team
 
+# Clear any existing MPS environment variables that might be set
 if 'PYTORCH_MPS_HIGH_WATERMARK_RATIO' in os.environ:
     del os.environ['PYTORCH_MPS_HIGH_WATERMARK_RATIO']
 if 'PYTORCH_MPS_LOW_WATERMARK_RATIO' in os.environ:
