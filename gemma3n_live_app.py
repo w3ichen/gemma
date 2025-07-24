@@ -538,11 +538,6 @@ class MacOptimizedGemma3n:
             print(f"Processing error: {error_details}")
             return f"❌ Error processing input: {str(e)}"
     
-    def toggle_tts(self) -> str:
-        """Toggle text-to-speech on/off"""
-        self.tts_enabled = not self.tts_enabled
-        return "🔊 Voice ON" if self.tts_enabled else "🔇 Voice OFF"
-    
     def get_conversation_history(self) -> str:
         """Get formatted conversation history"""
         if not self.conversation_history:
@@ -678,18 +673,16 @@ def create_mac_optimized_interface():
                     height=300
                 )
                 
-                # Audio input with streaming
+                # Audio input - handle via separate event, not streaming
                 microphone = gr.Audio(
                     sources=["microphone"],
-                    streaming=True,
                     type="numpy",
-                    label="Live Microphone",
+                    label="Audio Input (Click to Record)",
                     waveform_options=gr.WaveformOptions(show_recording_waveform=True)
                 )
                 
                 # Control buttons
                 with gr.Row():
-                    voice_toggle_btn = gr.Button("🔊 Voice ON", size="sm")
                     clear_btn = gr.Button("🗑️ Clear History", size="sm")
             
             with gr.Column(scale=1):
@@ -729,46 +722,68 @@ def create_mac_optimized_interface():
             )
             refresh_history_btn = gr.Button("🔄 Refresh History")
         
-        def process_streams(image, audio, prompt):
-            """Process streaming inputs with fixed logic"""
+        def process_video_stream(image, prompt):
+            print("PROCESS VIDEO STREAM:", image, prompt)
+            """Process only video stream - audio handled separately"""
             try:
                 if not ai_system.model_loaded:
                     return "Please load the model first.", "⚠️ Model not loaded"
                 
-                # Check if we have any input at all
-                if image is None and audio is None:
-                    return "Waiting for camera/microphone input...", "🔍 No input detected"
+                if image is None:
+                    return "Waiting for camera input...", "🔍 No video input"
                 
-                # Rate limiting - but allow first processing
+                # Rate limiting
                 current_time = time.time()
                 if (current_time - ai_system.last_process_time < ai_system.process_interval and 
                     ai_system.last_process_time > 0):
-                    return ai_response.value or "Processing...", "⏱️ Rate limited - waiting..."
+                    return "Processing...", "⏱️ Rate limited"
                 
                 # Process with lock and memory management
                 with ai_system.processing_lock:
-                    print(f"🔄 Processing at {datetime.now().strftime('%H:%M:%S')}")
+                    print(f"🔄 Processing video at {datetime.now().strftime('%H:%M:%S')}")
                     ai_system.last_process_time = current_time
                     
-                    response = ai_system.process_multimodal_input(image, audio, prompt)
+                    # Process only image for video stream
+                    response = ai_system.process_multimodal_input(image, None, prompt)
                     memory_info = ai_system.get_memory_status()
                     
-                    print(f"✅ Response generated: {response[:50]}...")
-                    return response, f"✅ {datetime.now().strftime('%H:%M:%S')} | {memory_info}"
+                    print(f"✅ Video response: {response[:50]}...")
+                    return response, f"📹 {datetime.now().strftime('%H:%M:%S')} | {memory_info}"
                     
             except Exception as e:
-                print(f"❌ Stream processing error: {e}")
+                print(f"❌ Video processing error: {e}")
                 ai_system.clear_memory()
-                return f"Error: {str(e)}", "❌ Error occurred - memory cleared"
+                return f"Video error: {str(e)}", "❌ Video error - memory cleared"
             
-        # Set up streaming with Mac-optimized parameters
+        # Set up video streaming only (audio streaming not supported the same way)
         webcam.stream(
-            fn=process_streams,
-            inputs=[webcam, microphone, conversation_prompt],
+            fn=process_video_stream,
+            inputs=[webcam, conversation_prompt],
             outputs=[ai_response, processing_status],
-            time_limit=30,   # Shorter for testing
-            stream_every=2,  # More frequent processing
+            time_limit=30,
+            stream_every=2.0,
             concurrency_limit=1
+        )
+
+        # Handle audio separately via change event
+        def process_audio_input(audio, prompt):
+            print("PROCESS AUDIO INPUT:", audio, prompt)
+            """Process audio when recording stops"""
+            if not ai_system.model_loaded or audio is None:
+                return "No audio or model not loaded", "⚠️ Audio processing skipped"
+            
+            try:
+                response = ai_system.process_multimodal_input(None, audio, prompt)
+                memory_info = ai_system.get_memory_status()
+                return response, f"🎤 Audio processed | {memory_info}"
+            except Exception as e:
+                return f"Audio error: {str(e)}", "❌ Audio processing failed"
+
+        # Set up audio event handler
+        microphone.change(
+            fn=process_audio_input,
+            inputs=[microphone, conversation_prompt],
+            outputs=[ai_response, processing_status]
         )
         
         # Event handlers
@@ -782,11 +797,6 @@ def create_mac_optimized_interface():
             fn=ai_system.load_model,
             inputs=[model_size],
             outputs=[model_status]
-        )
-        
-        voice_toggle_btn.click(
-            fn=ai_system.toggle_tts,
-            outputs=[voice_toggle_btn]
         )
         
         refresh_history_btn.click(

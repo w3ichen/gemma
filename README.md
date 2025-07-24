@@ -34,7 +34,7 @@ conda install pytorch torchvision torchaudio -c pytorch -y
 conda install -c conda-forge "numpy<2" pillow opencv -y
 
 # Install the web interface and AI model tools
-pip install gradio transformers timm accelerate safetensors huggingface_hub sounddevice soundfile pyttsx3 pygame librosa pyttsx3
+pip install gradio transformers timm accelerate safetensors huggingface_hub sounddevice soundfile pyttsx3 pygame librosa pyttsx3 mlx-vlm
 ```
 
 **⏱️ This process takes 5-15 minutes depending on your internet speed.**
