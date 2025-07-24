@@ -2,6 +2,11 @@
 """
 Mac-Optimized Gemma 3n Multimodal AI with MPS Memory Management
 Addresses MPS backend memory issues on Apple Silicon and Intel Macs
+
+    - Gemma 3n Models: https://huggingface.co/collections/google/gemma-3n-685065323f5984ef315c93f4
+    - Blog: https://huggingface.co/blog/gemma3n
+    - Gradio docs: https://www.gradio.app/docs
+    - Hugging face docs: https://huggingface.co/docs/transformers/en/index
 """
 
 
