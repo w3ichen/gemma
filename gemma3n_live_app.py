@@ -1,43 +1,50 @@
 #!/usr/bin/env python3
 """
-Mac-Optimized Gemma 3n Multimodal AI with MPS Memory Management
-Addresses MPS backend memory issues on Apple Silicon and Intel Macs
+Mac-Optimized Gemma 3n Multimodal AI with MLX and MPS Memory Management
+Automatically uses MLX on macOS for optimal Apple Silicon performance
 
     - Gemma 3n Models: https://huggingface.co/collections/google/gemma-3n-685065323f5984ef315c93f4
     - Blog: https://huggingface.co/blog/gemma3n
     - Gradio docs: https://www.gradio.app/docs
     - Hugging face docs: https://huggingface.co/docs/transformers/en/index
+    - MLX Community: https://huggingface.co/mlx-community
 """
-
 
 import os
 import sys
+import platform
 
-# CRITICAL FIX: Remove problematic environment variables and use the safest approach
-# The "invalid low watermark ratio 1.4" error occurs when PyTorch calculates internal ratios incorrectly
-# Solution: Use PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0 (unlimited) as recommended by PyTorch team
+# Detect macOS and set up MLX preference
+IS_MACOS = platform.system() == "Darwin"
+USE_MLX = IS_MACOS
 
-# Clear any existing MPS environment variables that might be set
-if 'PYTORCH_MPS_HIGH_WATERMARK_RATIO' in os.environ:
-    del os.environ['PYTORCH_MPS_HIGH_WATERMARK_RATIO']
-if 'PYTORCH_MPS_LOW_WATERMARK_RATIO' in os.environ:
-    del os.environ['PYTORCH_MPS_LOW_WATERMARK_RATIO']
+print(f"🖥️ Operating System: {platform.system()}")
+print(f"⚡ MLX Support: {'Enabled' if USE_MLX else 'Disabled'}")
 
-# Set the working configuration - this is the ONLY reliable setting for many systems
-os.environ['PYTORCH_MPS_HIGH_WATERMARK_RATIO'] = '0.0'  # Disable upper limit as recommended
-os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'  # Enable CPU fallback for unsupported ops
+if not USE_MLX:
+    # CRITICAL FIX: Remove problematic environment variables and use the safest approach
+    # The "invalid low watermark ratio 1.4" error occurs when PyTorch calculates internal ratios incorrectly
+    # Solution: Use PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0 (unlimited) as recommended by PyTorch team
 
-# Additional memory optimizations
-os.environ['TOKENIZERS_PARALLELISM'] = 'false'
-os.environ['OMP_NUM_THREADS'] = '1'
+    # Clear any existing MPS environment variables that might be set
+    if 'PYTORCH_MPS_HIGH_WATERMARK_RATIO' in os.environ:
+        del os.environ['PYTORCH_MPS_HIGH_WATERMARK_RATIO']
+    if 'PYTORCH_MPS_LOW_WATERMARK_RATIO' in os.environ:
+        del os.environ['PYTORCH_MPS_LOW_WATERMARK_RATIO']
 
-print("🔧 MPS Configuration:")
-print(f"   PYTORCH_MPS_HIGH_WATERMARK_RATIO: {os.environ.get('PYTORCH_MPS_HIGH_WATERMARK_RATIO', 'Not set')}")
-print(f"   PYTORCH_ENABLE_MPS_FALLBACK: {os.environ.get('PYTORCH_ENABLE_MPS_FALLBACK', 'Not set')}")
+    # Set the working configuration - this is the ONLY reliable setting for many systems
+    os.environ['PYTORCH_MPS_HIGH_WATERMARK_RATIO'] = '0.0'  # Disable upper limit as recommended
+    os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'  # Enable CPU fallback for unsupported ops
 
+    # Additional memory optimizations
+    os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+    os.environ['OMP_NUM_THREADS'] = '1'
+
+    print("🔧 MPS Configuration:")
+    print(f"   PYTORCH_MPS_HIGH_WATERMARK_RATIO: {os.environ.get('PYTORCH_MPS_HIGH_WATERMARK_RATIO', 'Not set')}")
+    print(f"   PYTORCH_ENABLE_MPS_FALLBACK: {os.environ.get('PYTORCH_ENABLE_MPS_FALLBACK', 'Not set')}")
 
 import gradio as gr
-import torch
 import numpy as np
 import tempfile
 import json
@@ -47,29 +54,54 @@ import wave
 import gc
 from datetime import datetime
 from PIL import Image
-from transformers import AutoProcessor, AutoModelForImageTextToText
 from huggingface_hub import login, whoami
 import pyttsx3
 from typing import Optional, Tuple, List, Dict, Any
+
+# Conditional imports based on MLX availability
+if USE_MLX:
+    try:
+        import mlx.core as mx
+        from mlx_vlm import load as mlx_load, generate as mlx_generate
+        from mlx_vlm.utils import load_config as mlx_load_config
+        print("✅ MLX-VLM imported successfully")
+        MLX_AVAILABLE = True
+    except ImportError:
+        print("⚠️ MLX-VLM not found. Install with: pip install mlx-vlm")
+        USE_MLX = False
+        MLX_AVAILABLE = False
+        import torch
+        from transformers import AutoProcessor, AutoModelForImageTextToText
+else:
+    MLX_AVAILABLE = False
+    import torch
+    from transformers import AutoProcessor, AutoModelForImageTextToText
 
 class MacOptimizedGemma3n:
     def __init__(self):
         self.model = None
         self.processor = None
+        self.tokenizer = None
         self.model_loaded = False
         self.conversation_history = []
         self.authenticated = False
+        self.use_mlx = USE_MLX and MLX_AVAILABLE
         
         # Memory management
-        self.device = self._get_optimal_device()
-        self.dtype = self._get_optimal_dtype()
-        self.max_memory_gb = self._get_available_memory()
+        if self.use_mlx:
+            self.device = "mlx"
+            self.dtype = "float16"  # MLX handles this automatically
+            self.max_memory_gb = self._get_mlx_memory()
+        else:
+            self.device = self._get_optimal_device()
+            self.dtype = self._get_optimal_dtype()
+            self.max_memory_gb = self._get_available_memory()
         
         # Streaming control
         self.is_streaming = False
         self.processing_lock = threading.Lock()
         self.last_process_time = 0
-        self.process_interval = 3.0  # Increased interval for stability
+        self.process_interval = 2.0 if self.use_mlx else 3.0  # Faster with MLX
         
         # Text-to-speech
         self.tts_engine = None
@@ -84,9 +116,23 @@ class MacOptimizedGemma3n:
         self.init_tts()
         self.load_config()
         
+        print(f"🖥️ Framework: {'MLX' if self.use_mlx else 'PyTorch'}")
         print(f"🖥️ Device: {self.device}")
         print(f"🧮 Data type: {self.dtype}")
         print(f"💾 Available memory: ~{self.max_memory_gb:.1f}GB")
+        
+    def _get_mlx_memory(self) -> float:
+        """Estimate memory for MLX on Apple Silicon"""
+        try:
+            import psutil
+            total_ram = psutil.virtual_memory().total / (1024**3)
+            # MLX is much more memory efficient - can use more RAM safely
+            safe_limit = min(total_ram * 0.7, 16.0)  # Up to 70% of RAM or 16GB
+            print(f"💾 Total RAM: {total_ram:.1f}GB, MLX safe limit: {safe_limit:.1f}GB")
+            return safe_limit
+        except Exception as e:
+            print(f"⚠️ Memory estimation error: {e}")
+            return 8.0  # Conservative fallback for MLX
         
     def _get_optimal_device(self) -> str:
         """Determine the best device for this Mac with buffer size awareness"""
@@ -98,14 +144,15 @@ class MacOptimizedGemma3n:
                     del test_tensor
                     print("🍎 MPS basic test passed")
                     
-                    # Check available memory more conservatively
+                    # More lenient RAM requirements since we're optimizing
                     import psutil
                     total_ram = psutil.virtual_memory().total / (1024**3)
-                    if total_ram < 16:  # Less than 16GB total RAM
-                        print("⚠️ Limited RAM detected - recommending CPU for stability")
+                    if total_ram >= 8:  # Lowered from 16GB to 8GB
+                        return "mps"
+                    else:
+                        print(f"⚠️ {total_ram:.1f}GB RAM - recommending CPU for stability")
                         return "cpu"
                     
-                    return "mps"
                 except Exception as e:
                     print(f"⚠️ MPS test failed: {e}")
                     return "cpu"
@@ -117,7 +164,7 @@ class MacOptimizedGemma3n:
             print(f"⚠️ Device detection error: {e}")
             return "cpu"
     
-    def _get_optimal_dtype(self) -> torch.dtype:
+    def _get_optimal_dtype(self):
         """Get optimal data type based on device"""
         if self.device == "mps":
             # MPS works better with float32 for stability
@@ -133,9 +180,9 @@ class MacOptimizedGemma3n:
             if self.device == "mps":
                 import psutil
                 total_ram = psutil.virtual_memory().total / (1024**3)
-                # Be much more conservative due to buffer size limits
-                safe_limit = min(total_ram * 0.3, 4.0)  # Max 4GB and only 30% of RAM
-                print(f"💾 Total RAM: {total_ram:.1f}GB, Ultra-safe MPS limit: {safe_limit:.1f}GB")
+                # Less conservative for better performance
+                safe_limit = min(total_ram * 0.5, 8.0)  # Up to 50% of RAM or 8GB
+                print(f"💾 Total RAM: {total_ram:.1f}GB, MPS safe limit: {safe_limit:.1f}GB")
                 return safe_limit
             elif self.device == "cuda":
                 return torch.cuda.get_device_properties(0).total_memory / (1024**3) * 0.8
@@ -144,16 +191,18 @@ class MacOptimizedGemma3n:
                 return psutil.virtual_memory().available / (1024**3) * 0.5
         except Exception as e:
             print(f"⚠️ Memory estimation error: {e}")
-            return 2.0  # Very conservative fallback
+            return 2.0  # Conservative fallback
     
     def clear_memory(self):
-        """Aggressively clear GPU/MPS memory"""
+        """Clear memory based on framework"""
         try:
-            if self.device == "mps":
+            if self.use_mlx:
+                # MLX automatic memory management
+                gc.collect()
+            elif self.device == "mps":
                 # Clear MPS cache
                 if hasattr(torch.mps, 'empty_cache'):
                     torch.mps.empty_cache()
-                # Force garbage collection
                 gc.collect()
             elif self.device == "cuda":
                 torch.cuda.empty_cache()
@@ -267,7 +316,7 @@ class MacOptimizedGemma3n:
             return f"❌ Authentication failed: {str(e)}"
     
     def load_model(self, model_size: str = "E2B") -> str:
-        """Load Gemma 3n model with aggressive size controls"""
+        """Load Gemma 3n model with MLX or PyTorch"""
         try:
             if not self.authenticated:
                 return "❌ Please authenticate with Hugging Face first"
@@ -275,7 +324,45 @@ class MacOptimizedGemma3n:
             # Clear memory before loading
             self.clear_memory()
             
-            # FORCE E2B on MPS to avoid buffer size issues
+            if self.use_mlx:
+                return self._load_mlx_model(model_size)
+            else:
+                return self._load_pytorch_model(model_size)
+                
+        except Exception as e:
+            self.model_loaded = False
+            error_msg = f"❌ Error loading model: {str(e)}"
+            print(error_msg)
+            return error_msg
+    
+    def _load_mlx_model(self, model_size: str) -> str:
+        """Load model using MLX for optimal Apple Silicon performance"""
+        try:
+            # Use quantized MLX models for better performance
+            model_id = f"mlx-community/gemma-3n-{model_size.lower()}-it-4bit"
+            
+            print(f"🔄 Loading MLX model: {model_id}")
+            print("📚 Loading MLX model and processor...")
+            
+            # Load MLX model
+            self.model, self.processor = mlx_load(model_id)
+            
+            self.model_loaded = True
+            self.save_config(model_size=model_size)
+            self.clear_memory()
+            
+            return f"✅ MLX Model loaded with 4-bit quantization for optimal performance!"
+            
+        except Exception as e:
+            print(f"⚠️ MLX model loading failed: {e}")
+            print("🔄 Falling back to PyTorch...")
+            self.use_mlx = False
+            return self._load_pytorch_model(model_size)
+    
+    def _load_pytorch_model(self, model_size: str) -> str:
+        """Load model using PyTorch (fallback)"""
+        try:
+            # Force E2B on MPS to avoid buffer size issues
             if self.device == "mps":
                 model_size = "E2B"
                 print("🔒 Forcing E2B model on MPS to avoid buffer size errors")
@@ -283,7 +370,7 @@ class MacOptimizedGemma3n:
             model_id = f"google/gemma-3n-{model_size.lower()}-it"
             os.makedirs(self.model_cache_dir, exist_ok=True)
             
-            print(f"🔄 Loading {model_id} with buffer size limits...")
+            print(f"🔄 Loading PyTorch model: {model_id}")
             
             # Load processor first
             print("📚 Loading processor...")
@@ -292,8 +379,8 @@ class MacOptimizedGemma3n:
                 cache_dir=self.model_cache_dir
             )
             
-            # Ultra-conservative model loading for MPS
-            print("🧠 Loading model with strict memory controls...")
+            # Conservative model loading
+            print("🧠 Loading model with memory controls...")
             
             model_kwargs = {
                 "torch_dtype": self.dtype,
@@ -302,63 +389,31 @@ class MacOptimizedGemma3n:
                 "device_map": None,  # Manual placement
             }
             
-            # Load on CPU first, then carefully move to MPS
-            try:
-                print("   Step 1: Loading on CPU...")
-                self.model = AutoModelForImageTextToText.from_pretrained(
-                    model_id,
-                    **model_kwargs
-                ).eval()
-                
-                if self.device == "mps":
-                    print("   Step 2: Attempting MPS transfer in chunks...")
-                    try:
-                        # Try to move model to MPS with error catching
-                        self.model = self.model.to(self.device)
-                        print("   ✅ Successfully moved to MPS")
-                    except Exception as mps_error:
-                        print(f"   ⚠️ MPS transfer failed: {mps_error}")
-                        print("   📱 Keeping on CPU for stability")
-                        self.device = "cpu"
-                
-                self.model_loaded = True
-                self.save_config(model_size=model_size)
-                self.clear_memory()
-                
-                return f"✅ Model loaded on {self.device}!"
-                
-            except Exception as load_error:
-                # Complete CPU fallback
-                print(f"⚠️ Model loading failed: {load_error}")
-                if "Invalid buffer size" in str(load_error):
-                    print("🔄 Buffer size error - forcing CPU mode...")
+            # Load on CPU first, then move to device
+            print("   Step 1: Loading on CPU...")
+            self.model = AutoModelForImageTextToText.from_pretrained(
+                model_id,
+                **model_kwargs
+            ).eval()
+            
+            if self.device != "cpu":
+                print(f"   Step 2: Moving to {self.device}...")
+                try:
+                    self.model = self.model.to(self.device)
+                    print(f"   ✅ Successfully moved to {self.device}")
+                except Exception as device_error:
+                    print(f"   ⚠️ {self.device} transfer failed: {device_error}")
+                    print("   📱 Keeping on CPU for stability")
                     self.device = "cpu"
-                    self.dtype = torch.float32
-                    
-                    model_kwargs["torch_dtype"] = self.dtype
-                    
-                    self.model = AutoModelForImageTextToText.from_pretrained(
-                        model_id,
-                        **model_kwargs
-                    ).eval()
-                    
-                    self.model_loaded = True
-                    return f"✅ Model loaded on CPU (buffer size fallback)"
-                else:
-                    raise load_error
-                    
+            
+            self.model_loaded = True
+            self.save_config(model_size=model_size)
+            self.clear_memory()
+            
+            return f"✅ PyTorch Model loaded on {self.device}!"
+            
         except Exception as e:
-            self.model_loaded = False
-            error_msg = f"❌ Error loading model: {str(e)}"
-            
-            if "Invalid buffer size" in str(e):
-                error_msg += "\n\n💡 Buffer size error detected:"
-                error_msg += "\n   This happens when the model is too large for MPS."
-                error_msg += "\n   The app will automatically use CPU mode."
-                error_msg += "\n   CPU mode is slower but will work reliably."
-            
-            print(error_msg)
-            return error_msg
+            raise e
             
     def preprocess_audio(self, audio_input) -> Optional[str]:
         """Convert audio input to proper format for the model"""
@@ -407,7 +462,7 @@ class MacOptimizedGemma3n:
         return None
     
     def process_multimodal_input(self, image, audio, prompt: str) -> str:
-        """Process multimodal input with Mac-optimized memory management"""
+        """Process multimodal input with framework-optimized approach"""
         if not self.model_loaded:
             return "⚠️ Model not loaded. Please load the model first."
         
@@ -417,6 +472,139 @@ class MacOptimizedGemma3n:
             # Clear memory before processing
             self.clear_memory()
             
+            if self.use_mlx:
+                return self._process_with_mlx(image, audio, prompt)
+            else:
+                return self._process_with_pytorch(image, audio, prompt)
+                
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"Processing error: {error_details}")
+            return f"❌ Error processing input: {str(e)}"
+    
+    def _process_with_mlx(self, image, audio, prompt: str) -> str:
+        """Process using MLX for optimal Apple Silicon performance"""
+        import subprocess
+        import tempfile
+        
+        try:
+            print(f"PROCESS WITH MLX: {image is not None} {audio}")
+            
+            # Handle image input
+            if image is not None:
+                try:
+                    # Convert and resize image if too large
+                    if isinstance(image, np.ndarray):
+                        if image.shape[0] > 768 or image.shape[1] > 768:
+                            pil_img = Image.fromarray(image.astype('uint8'))
+                            pil_img = pil_img.resize((768, 768), Image.Resampling.LANCZOS)
+                        else:
+                            pil_img = Image.fromarray(image.astype('uint8'))
+                    else:
+                        pil_img = image
+                    
+                    # Save image temporarily for MLX-VLM
+                    temp_img = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+                    pil_img.save(temp_img.name, 'PNG')
+                    temp_img.close()
+                    
+                    # Use command line approach for MLX-VLM (more reliable)
+                    cmd = [
+                        'python', '-m', 'mlx_vlm.generate',
+                        '--model', 'mlx-community/gemma-3n-e2b-it-4bit',
+                        '--max-tokens', '100',
+                        '--temperature', '0.7',
+                        '--prompt', prompt,
+                        '--image', temp_img.name
+                    ]
+                    
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                    if result.returncode == 0:
+                        response = result.stdout.strip()
+                        print("📸 MLX image processed successfully")
+                    else:
+                        response = f"MLX command failed: {result.stderr}"
+                        print(f"MLX command error: {result.stderr}")
+                    
+                    # Clean up temp image
+                    try:
+                        os.unlink(temp_img.name)
+                    except:
+                        pass
+                        
+                except subprocess.TimeoutExpired:
+                    response = "MLX image processing timed out"
+                except Exception as img_error:
+                    print(f"MLX image processing error: {img_error}")
+                    return f"❌ MLX image error: {str(img_error)}"
+            
+            # Handle audio input  
+            elif audio is not None:
+                audio_path = self.preprocess_audio(audio)
+                if audio_path:
+                    try:
+                        # Use command line approach for MLX-VLM audio
+                        cmd = [
+                            'python', '-m', 'mlx_vlm.generate',
+                            '--model', 'mlx-community/gemma-3n-e2b-it-4bit',
+                            '--max-tokens', '100',
+                            '--temperature', '0.7',
+                            '--prompt', prompt,
+                            '--audio', audio_path
+                        ]
+                        
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                        if result.returncode == 0:
+                            response = result.stdout.strip()
+                            print("🎤 MLX audio processed successfully")
+                        else:
+                            response = f"MLX audio command failed: {result.stderr}"
+                            print(f"MLX audio command error: {result.stderr}")
+                        
+                        # Clean up temporary audio file
+                        if audio_path != audio:
+                            try:
+                                os.unlink(audio_path)
+                            except:
+                                pass
+                                
+                    except subprocess.TimeoutExpired:
+                        response = "MLX audio processing timed out"
+                    except Exception as audio_error:
+                        print(f"MLX audio processing error: {audio_error}")
+                        return f"❌ MLX audio error: {str(audio_error)}"
+                else:
+                    return "No valid audio detected"
+            else:
+                return "No valid media detected. Please ensure your camera and microphone are working."
+            
+            # Clear memory after processing
+            self.clear_memory()
+            
+            # Speak the response
+            self.speak_response(response)
+            
+            # Add to conversation history
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            self.conversation_history.append({
+                "timestamp": timestamp,
+                "response": response
+            })
+            
+            # Keep only last 5 conversations to save memory
+            if len(self.conversation_history) > 5:
+                self.conversation_history = self.conversation_history[-5:]
+            
+            return response
+            
+        except Exception as e:
+            print(f"MLX processing error: {e}")
+            return f"❌ MLX processing error: {str(e)}"
+    
+    def _process_with_pytorch(self, image, audio, prompt: str) -> str:
+        """Process using PyTorch (fallback)"""
+        try:
             # Prepare message content
             content = [{"type": "text", "text": prompt}]
             has_media = False
@@ -428,18 +616,16 @@ class MacOptimizedGemma3n:
                     if isinstance(image, np.ndarray):
                         # Resize if image is too large to save memory
                         if image.shape[0] > 768 or image.shape[1] > 768:
-                            from PIL import Image as PILImage
-                            pil_img = PILImage.fromarray(image.astype('uint8'), 'RGB')
-                            pil_img = pil_img.resize((768, 768), PILImage.Resampling.LANCZOS)
-                            image_pil = pil_img
+                            pil_img = Image.fromarray(image.astype('uint8'))
+                            pil_img = pil_img.resize((768, 768), Image.Resampling.LANCZOS)
                         else:
-                            image_pil = Image.fromarray(image.astype('uint8'), 'RGB')
+                            pil_img = Image.fromarray(image.astype('uint8'))
                     else:
-                        image_pil = image
+                        pil_img = image
                     
-                    content.append({"type": "image", "image": image_pil})
+                    content.append({"type": "image", "image": pil_img})
                     has_media = True
-                    print("📸 Image processed")
+                    print("📸 Image processed for PyTorch")
                     
                 except Exception as img_error:
                     print(f"Image processing error: {img_error}")
@@ -449,7 +635,7 @@ class MacOptimizedGemma3n:
             if audio_path:
                 content.append({"type": "audio", "audio": audio_path})
                 has_media = True
-                print("🎤 Audio processed")
+                print("🎤 Audio processed for PyTorch")
             
             if not has_media:
                 return "No valid media detected. Please ensure your camera and microphone are working."
@@ -467,32 +653,26 @@ class MacOptimizedGemma3n:
             )
             
             # Move to device
-            inputs = {k: v.to(self.device) if torch.is_tensor(v) else v for k, v in inputs.items()}
+            inputs = {k: v.to(self.device) if hasattr(v, 'to') else v for k, v in inputs.items()}
             input_len = inputs["input_ids"].shape[-1]
             
             # Generate response with memory-conscious settings
-            with torch.inference_mode():
-                # generation = self.model.generate(
-                #     **inputs,
-                #     max_new_tokens=100,  # Reduced for memory efficiency
-                #     do_sample=True,
-                #     temperature=0.7,
-                #     top_p=0.9,
-                #     pad_token_id=self.processor.tokenizer.eos_token_id,
-                #     eos_token_id=self.processor.tokenizer.eos_token_id,
-                #     use_cache=True,  # Enable KV cache
-                # )
-                generation = self.model.generate(
-                    **inputs,
-                    max_new_tokens=50,  # Even smaller
-                    do_sample=False,    # Disable sampling for speed
-                    pad_token_id=self.processor.tokenizer.eos_token_id,
-                    eos_token_id=self.processor.tokenizer.eos_token_id,
-                    use_cache=False,    # Disable cache to save memory
-                )
-                
-                # Extract only the new tokens
-                generation = generation[:, input_len:]
+            if not self.use_mlx:
+                import torch
+                with torch.inference_mode():
+                    generation = self.model.generate(
+                        **inputs,
+                        max_new_tokens=100,  # Increased for better responses
+                        do_sample=True,
+                        temperature=0.7,
+                        top_p=0.9,
+                        pad_token_id=self.processor.tokenizer.eos_token_id,
+                        eos_token_id=self.processor.tokenizer.eos_token_id,
+                        use_cache=False,    # Disable cache to save memory
+                    )
+                    
+                    # Extract only the new tokens
+                    generation = generation[:, input_len:]
             
             # Decode the response
             decoded = self.processor.batch_decode(generation, skip_special_tokens=True)[0]
@@ -528,15 +708,8 @@ class MacOptimizedGemma3n:
                 self.clear_memory()
                 return "⚠️ MPS memory exhausted. Try:\n1. Restart the app\n2. Use smaller images\n3. Switch to CPU mode"
             else:
-                import traceback
-                error_details = traceback.format_exc()
-                print(f"Processing error: {error_details}")
-                return f"❌ Error: {str(e)}"
-        except Exception as e:
-            import traceback
-            error_details = traceback.format_exc()
-            print(f"Processing error: {error_details}")
-            return f"❌ Error processing input: {str(e)}"
+                print(f"PyTorch processing error: {e}")
+                return f"❌ PyTorch Error: {str(e)}"
     
     def get_conversation_history(self) -> str:
         """Get formatted conversation history"""
@@ -558,19 +731,22 @@ class MacOptimizedGemma3n:
     def get_memory_status(self) -> str:
         """Get current memory status"""
         try:
-            if self.device == "mps":
+            if self.use_mlx:
+                return f"Framework: MLX | Device: Apple Silicon | Status: Optimal"
+            elif self.device == "mps":
                 # For MPS, we can't easily get allocated memory, so estimate
-                return f"Device: {self.device} | Estimated usage: Moderate"
+                return f"Framework: PyTorch | Device: {self.device} | Usage: Moderate"
             elif self.device == "cuda":
+                import torch
                 allocated = torch.cuda.memory_allocated() / (1024**3)
                 cached = torch.cuda.memory_reserved() / (1024**3)
-                return f"Device: {self.device} | Allocated: {allocated:.2f}GB | Cached: {cached:.2f}GB"
+                return f"Framework: PyTorch | Device: {self.device} | Allocated: {allocated:.2f}GB | Cached: {cached:.2f}GB"
             else:
                 import psutil
                 memory = psutil.virtual_memory()
-                return f"Device: {self.device} | RAM: {memory.percent}% used"
+                return f"Framework: PyTorch | Device: {self.device} | RAM: {memory.percent}% used"
         except:
-            return f"Device: {self.device} | Status: Unknown"
+            return f"Framework: {'MLX' if self.use_mlx else 'PyTorch'} | Device: {self.device} | Status: Unknown"
 
 def create_mac_optimized_interface():
     """Create Mac-optimized Gradio interface"""
@@ -592,19 +768,22 @@ def create_mac_optimized_interface():
         """
     ) as demo:
         
+        framework_name = "MLX (Apple Silicon Optimized)" if ai_system.use_mlx else "PyTorch"
+        
         gr.Markdown(f"""
         # 🍎 Mac-Optimized Gemma 3n Multimodal AI
         ### Specially optimized for Apple Silicon and Intel Macs
         
         **Current Configuration:**
+        - ⚡ Framework: {framework_name}
         - 🖥️ Device: {ai_system.device.upper()}
-        - 🧮 Data Type: {str(ai_system.dtype).split('.')[-1]}
+        - 🧮 Data Type: {str(ai_system.dtype).split('.')[-1] if hasattr(ai_system.dtype, 'split') else ai_system.dtype}
         - 💾 Available Memory: ~{ai_system.max_memory_gb:.1f}GB
-        - 🛡️ MPS High Watermark: {os.environ.get('PYTORCH_MPS_HIGH_WATERMARK_RATIO', 'Not set')}
+        - 🛡️ OS: {platform.system()} {platform.machine()}
         
         **Features:**
         - 🎥 Real-time video processing (memory-optimized)
-        - 🎤 Continuous audio input with noise filtering
+        - 🎤 Audio input with noise filtering
         - 🗣️ Natural voice responses
         - 💬 Conversation memory with auto-cleanup
         - 🧹 Automatic memory management
@@ -638,12 +817,13 @@ def create_mac_optimized_interface():
             )
             
             gr.Markdown("### Model Configuration")
+            model_info = "MLX models are automatically quantized for optimal performance" if ai_system.use_mlx else "E2B: Recommended for Mac (2GB) | E4B: Better quality (4GB+)"
             with gr.Row():
                 model_size = gr.Dropdown(
                     choices=["E2B", "E4B"], 
                     value="E2B", 
                     label="Model Size",
-                    info="E2B: Recommended for Mac (2GB) | E4B: Better quality (4GB+)"
+                    info=model_info
                 )
                 load_btn = gr.Button("🚀 Load Model", variant="primary")
             
@@ -676,13 +856,14 @@ def create_mac_optimized_interface():
                 # Audio input - handle via separate event, not streaming
                 microphone = gr.Audio(
                     sources=["microphone"],
-                    type="numpy",
+                    type="filepath",  # Changed to filepath for better compatibility
                     label="Audio Input (Click to Record)",
                     waveform_options=gr.WaveformOptions(show_recording_waveform=True)
                 )
                 
                 # Control buttons
                 with gr.Row():
+                    voice_toggle_btn = gr.Button("🔊 Voice ON", size="sm")
                     clear_btn = gr.Button("🗑️ Clear History", size="sm")
             
             with gr.Column(scale=1):
@@ -723,7 +904,6 @@ def create_mac_optimized_interface():
             refresh_history_btn = gr.Button("🔄 Refresh History")
         
         def process_video_stream(image, prompt):
-            print("PROCESS VIDEO STREAM:", image, prompt)
             """Process only video stream - audio handled separately"""
             try:
                 if not ai_system.model_loaded:
@@ -755,25 +935,25 @@ def create_mac_optimized_interface():
                 ai_system.clear_memory()
                 return f"Video error: {str(e)}", "❌ Video error - memory cleared"
             
-        # Set up video streaming only (audio streaming not supported the same way)
+        # Set up video streaming
         webcam.stream(
             fn=process_video_stream,
             inputs=[webcam, conversation_prompt],
             outputs=[ai_response, processing_status],
             time_limit=30,
-            stream_every=2.0,
+            stream_every=ai_system.process_interval,
             concurrency_limit=1
         )
 
         # Handle audio separately via change event
-        def process_audio_input(audio, prompt):
-            print("PROCESS AUDIO INPUT:", audio, prompt)
+        def process_audio_input(audio_file, prompt):
             """Process audio when recording stops"""
-            if not ai_system.model_loaded or audio is None:
-                return "No audio or model not loaded", "⚠️ Audio processing skipped"
+            if not ai_system.model_loaded or not audio_file:
+                return "No audio file or model not loaded", "⚠️ Audio processing skipped"
             
             try:
-                response = ai_system.process_multimodal_input(None, audio, prompt)
+                # Use the audio file path directly for MLX compatibility
+                response = ai_system.process_multimodal_input(None, audio_file, prompt)
                 memory_info = ai_system.get_memory_status()
                 return response, f"🎤 Audio processed | {memory_info}"
             except Exception as e:
@@ -786,6 +966,12 @@ def create_mac_optimized_interface():
             outputs=[ai_response, processing_status]
         )
         
+        # Voice toggle functionality
+        def toggle_voice():
+            ai_system.tts_enabled = not ai_system.tts_enabled
+            status = "🔊 Voice ON" if ai_system.tts_enabled else "🔇 Voice OFF"
+            return status
+        
         # Event handlers
         auth_btn.click(
             fn=ai_system.authenticate_huggingface,
@@ -797,6 +983,11 @@ def create_mac_optimized_interface():
             fn=ai_system.load_model,
             inputs=[model_size],
             outputs=[model_status]
+        )
+        
+        voice_toggle_btn.click(
+            fn=toggle_voice,
+            outputs=[voice_toggle_btn]
         )
         
         refresh_history_btn.click(
@@ -828,10 +1019,15 @@ def create_mac_optimized_interface():
 
 if __name__ == "__main__":
     print("🍎 Starting Mac-Optimized Gemma 3n Multimodal AI...")
-    print(f"🔧 PyTorch version: {torch.__version__}")
-    print(f"🖥️ CUDA available: {torch.cuda.is_available()}")
-    print(f"🍎 MPS available: {torch.backends.mps.is_available()}")
-    print(f"💾 MPS High Watermark Ratio: {os.environ.get('PYTORCH_MPS_HIGH_WATERMARK_RATIO', 'Not set')}")
+    
+    if not USE_MLX:
+        import torch
+        print(f"🔧 PyTorch version: {torch.__version__}")
+        print(f"🖥️ CUDA available: {torch.cuda.is_available()}")
+        print(f"🍎 MPS available: {torch.backends.mps.is_available()}")
+        print(f"💾 MPS High Watermark Ratio: {os.environ.get('PYTORCH_MPS_HIGH_WATERMARK_RATIO', 'Not set')}")
+    else:
+        print(f"⚡ MLX framework detected - optimal Apple Silicon performance enabled")
     
     try:
         # Create and launch the interface
@@ -854,8 +1050,10 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"❌ Application error: {e}")
         print("\n💡 Troubleshooting tips:")
-        print("1. Make sure you have sufficient memory available")
-        print("2. Close other memory-intensive applications")
-        print("3. Try restarting your Mac")
-        print("4. Consider using the E2B model instead of E4B")
+        if not MLX_AVAILABLE and IS_MACOS:
+            print("1. Install MLX for optimal performance: pip install mlx-vlm")
+        print("2. Make sure you have sufficient memory available")
+        print("3. Close other memory-intensive applications")
+        print("4. Try restarting your Mac")
+        print("5. Consider using the E2B model instead of E4B")
         sys.exit(1)

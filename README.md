@@ -34,7 +34,13 @@ conda install pytorch torchvision torchaudio -c pytorch -y
 conda install -c conda-forge "numpy<2" pillow opencv -y
 
 # Install the web interface and AI model tools
-pip install gradio transformers timm accelerate safetensors huggingface_hub sounddevice soundfile pyttsx3 pygame librosa pyttsx3 mlx-vlm
+pip install gradio transformers timm accelerate safetensors huggingface_hub sounddevice soundfile pyttsx3 pygame librosa pyttsx3
+```
+
+Installing xlm-vlm: https://huggingface.co/mlx-community/gemma-3-4b-it-4bit/discussions/3 on mac
+```bash
+brew install gcc libomp openblas
+pip install mlx-vlm
 ```
 
 **⏱️ This process takes 5-15 minutes depending on your internet speed.**
